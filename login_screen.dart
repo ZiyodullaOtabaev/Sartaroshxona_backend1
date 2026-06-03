@@ -300,36 +300,17 @@ class _LoginScreenState extends State<LoginScreen>
     setState(() => _isLoading = false);
     if (!mounted) return;
 
-    if (result == null) {
-      _showMsg("Server bilan aloqa yo'q. Internetni tekshiring.", isError: true);
+    // Yangi LoginResult modeli bilan ishlash
+    if (!result.isSuccess) {
+      _showMsg(result.errorMessage ?? "Login xatosi", isError: true);
       return;
     }
 
-    // Backend turli formatda javob qaytarishi mumkin
-    // Format 1: {"status": "success", "user": {...}}
-    // Format 2: {"user": {...}, "token": "..."}
-    // Format 3: to'g'ridan to'g'ri user object
-
-    Map<String, dynamic>? user;
-
-    if (result.containsKey('status') && result['status'] == 'success') {
-      user = result['user'];
-    } else if (result.containsKey('user')) {
-      user = result['user'];
-    } else if (result.containsKey('id')) {
-      // To'g'ridan to'g'ri user object
-      user = result;
-    } else if (result.containsKey('detail')) {
-      // FastAPI xato formati
-      _showMsg("Email yoki parol noto'g'ri", isError: true);
-      return;
-    } else {
-      _showMsg("Email yoki parol noto'g'ri", isError: true);
-      return;
-    }
+    final data = result.data!;
+    final user = data['user'];
 
     if (user == null) {
-      _showMsg("Email yoki parol noto'g'ri", isError: true);
+      _showMsg("Server javobida xatolik", isError: true);
       return;
     }
 

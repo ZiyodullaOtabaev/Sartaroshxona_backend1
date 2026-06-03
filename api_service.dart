@@ -1,11 +1,20 @@
 import 'dart:convert';
+import 'dart:async';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:sartaroshxona/models/barber.dart';
 import 'package:sartaroshxona/utils/app_constants.dart';
 
-/// API xizmati — backend bilan aloqa
-/// JWT token bilan ishlaydi, auto-retry va xatolik boshqaruvi bilan
+/// ═══════════════════════════════════════════════════════════════════════════════
+/// API SERVICE — Backend bilan professional aloqa
+///
+/// Xususiyatlari:
+/// - JWT token boshqaruvi (auto-save, auto-load)
+/// - Retry logic (timeout bo'lganda qayta urinish)
+/// - Aniq xato xabarlari (network, timeout, server, auth)
+/// - Singleton pattern
+/// ═══════════════════════════════════════════════════════════════════════════════
 class ApiService {
   static final ApiService _instance = ApiService._internal();
   factory ApiService() => _instance;
@@ -38,13 +47,22 @@ class ApiService {
     await prefs.remove(AppConstants.userIdKey);
     await prefs.remove(AppConstants.userRoleKey);
     await prefs.remove(AppConstants.userNameKey);
+    await prefs.remove(AppConstants.barberIdKey);
   }
 
-  Future<void> saveUserData({required int userId, required String role, required String name}) async {
+  Future<void> saveUserData({
+    required int userId,
+    required String role,
+    required String name,
+    int? barberId,
+  }) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setInt(AppConstants.userIdKey, userId);
     await prefs.setString(AppConstants.userRoleKey, role);
     await prefs.setString(AppConstants.userNameKey, name);
+    if (barberId != null) {
+      await prefs.setInt(AppConstants.barberIdKey, barberId);
+    }
   }
 
   Future<int?> getSavedUserId() async {
@@ -57,7 +75,12 @@ class ApiService {
     return prefs.getString(AppConstants.userRoleKey);
   }
 
-  // ─── HTTP HELPERS ─────────────────────────────────────────────────────────
+  Future<int?> getSavedBarberId() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getInt(AppConstants.barberIdKey);
+  }
+
+  // ─── HTTP HELPERS (with retry & proper error handling) ────────────────────
 
   Future<Map<String, String>> _headers() async {
     final token = await getToken();
@@ -68,80 +91,224 @@ class ApiService {
     };
   }
 
-  Future<http.Response?> _get(String endpoint) async {
+  /// GET so'rov — retry bilan
+  Future<ApiResponse> _get(String endpoint) async {
+    return _request('GET', endpoint);
+  }
+
+  /// POST so'rov — retry bilan
+  Future<ApiResponse> _post(String endpoint, {Map<String, dynamic>? body}) async {
+    return _request('POST', endpoint, body: body);
+  }
+
+  /// PUT so'rov — retry bilan
+  Future<ApiResponse> _put(String endpoint, {Map<String, dynamic>? body}) async {
+    return _request('PUT', endpoint, body: body);
+  }
+
+  /// DELETE so'rov — retry bilan
+  Future<ApiResponse> _delete(String endpoint) async {
+    return _request('DELETE', endpoint);
+  }
+
+  /// Umumiy HTTP so'rov — barcha xatolarni to'g'ri boshqaradi
+  Future<ApiResponse> _request(
+    String method,
+    String endpoint, {
+    Map<String, dynamic>? body,
+    int retryCount = 0,
+  }) async {
     try {
       final headers = await _headers();
-      return await http.get(
-        Uri.parse('$baseUrl$endpoint'),
-        headers: headers,
-      ).timeout(_timeout);
+      final uri = Uri.parse('$baseUrl$endpoint');
+      http.Response response;
+
+      switch (method) {
+        case 'GET':
+          response = await http.get(uri, headers: headers).timeout(_timeout);
+          break;
+        case 'POST':
+          response = await http.post(uri, headers: headers, body: body != null ? jsonEncode(body) : null).timeout(_timeout);
+          break;
+        case 'PUT':
+          response = await http.put(uri, headers: headers, body: body != null ? jsonEncode(body) : null).timeout(_timeout);
+          break;
+        case 'DELETE':
+          response = await http.delete(uri, headers: headers).timeout(_timeout);
+          break;
+        default:
+          return ApiResponse.error("Noto'g'ri HTTP method", ApiErrorType.unknown);
+      }
+
+      // Muvaffaqiyatli
+      if (response.statusCode >= 200 && response.statusCode < 300) {
+        return ApiResponse.success(response);
+      }
+
+      // Auth xato — token muddati tugagan
+      if (response.statusCode == 401) {
+        return ApiResponse.error(
+          _extractErrorMessage(response) ?? "Avtorizatsiya muddati tugagan. Qayta login qiling.",
+          ApiErrorType.unauthorized,
+        );
+      }
+
+      // Forbidden
+      if (response.statusCode == 403) {
+        return ApiResponse.error(
+          _extractErrorMessage(response) ?? "Bu amalni bajarish uchun ruxsatingiz yo'q",
+          ApiErrorType.forbidden,
+        );
+      }
+
+      // Not found
+      if (response.statusCode == 404) {
+        return ApiResponse.error(
+          _extractErrorMessage(response) ?? "Ma'lumot topilmadi",
+          ApiErrorType.notFound,
+        );
+      }
+
+      // Conflict (duplicate)
+      if (response.statusCode == 409) {
+        return ApiResponse.error(
+          _extractErrorMessage(response) ?? "Bu amal allaqachon bajarilgan",
+          ApiErrorType.conflict,
+        );
+      }
+
+      // Validation error
+      if (response.statusCode == 422) {
+        return ApiResponse.error(
+          _extractValidationError(response) ?? "Ma'lumotlar noto'g'ri kiritilgan",
+          ApiErrorType.validation,
+        );
+      }
+
+      // Server error
+      if (response.statusCode >= 500) {
+        return ApiResponse.error(
+          "Serverda xatolik yuz berdi. Keyinroq urinib ko'ring.",
+          ApiErrorType.serverError,
+        );
+      }
+
+      return ApiResponse.error(
+        _extractErrorMessage(response) ?? "Kutilmagan xato (${response.statusCode})",
+        ApiErrorType.unknown,
+      );
+    } on TimeoutException {
+      // Retry
+      if (retryCount < AppConstants.maxRetryAttempts) {
+        _log('$method $endpoint TIMEOUT — qayta urinish (${retryCount + 1})');
+        await Future.delayed(Duration(seconds: 1 + retryCount));
+        return _request(method, endpoint, body: body, retryCount: retryCount + 1);
+      }
+      return ApiResponse.error(
+        "Server javob bermayapti. Internet aloqangizni tekshiring.",
+        ApiErrorType.timeout,
+      );
+    } on SocketException {
+      return ApiResponse.error(
+        "Server bilan aloqa yo'q. Internet yoqilganmi? Server ishlayaptimi?",
+        ApiErrorType.network,
+      );
+    } on HandshakeException {
+      return ApiResponse.error(
+        "SSL/TLS xatosi. Server manzilini tekshiring.",
+        ApiErrorType.network,
+      );
     } catch (e) {
-      _logError('GET $endpoint', e);
+      _log('$method $endpoint ERROR: $e');
+      // Retry for unknown errors
+      if (retryCount < AppConstants.maxRetryAttempts) {
+        await Future.delayed(Duration(seconds: 1));
+        return _request(method, endpoint, body: body, retryCount: retryCount + 1);
+      }
+      return ApiResponse.error(
+        "Kutilmagan xato yuz berdi: ${e.toString().length > 100 ? e.toString().substring(0, 100) : e}",
+        ApiErrorType.unknown,
+      );
+    }
+  }
+
+  String? _extractErrorMessage(http.Response response) {
+    try {
+      final body = jsonDecode(response.body);
+      return body['detail']?.toString();
+    } catch (_) {
       return null;
     }
   }
 
-  Future<http.Response?> _post(String endpoint, {Map<String, dynamic>? body}) async {
+  String? _extractValidationError(http.Response response) {
     try {
-      final headers = await _headers();
-      return await http.post(
-        Uri.parse('$baseUrl$endpoint'),
-        headers: headers,
-        body: body != null ? jsonEncode(body) : null,
-      ).timeout(_timeout);
-    } catch (e) {
-      _logError('POST $endpoint', e);
+      final body = jsonDecode(response.body);
+      if (body['detail'] is List) {
+        final errors = (body['detail'] as List);
+        if (errors.isNotEmpty) {
+          final first = errors.first;
+          return first['msg']?.toString() ?? "Ma'lumotlar noto'g'ri";
+        }
+      }
+      return body['detail']?.toString();
+    } catch (_) {
       return null;
     }
   }
 
-  Future<http.Response?> _put(String endpoint, {Map<String, dynamic>? body}) async {
-    try {
-      final headers = await _headers();
-      return await http.put(
-        Uri.parse('$baseUrl$endpoint'),
-        headers: headers,
-        body: body != null ? jsonEncode(body) : null,
-      ).timeout(_timeout);
-    } catch (e) {
-      _logError('PUT $endpoint', e);
-      return null;
-    }
-  }
-
-  Future<http.Response?> _delete(String endpoint) async {
-    try {
-      final headers = await _headers();
-      return await http.delete(
-        Uri.parse('$baseUrl$endpoint'),
-        headers: headers,
-      ).timeout(_timeout);
-    } catch (e) {
-      _logError('DELETE $endpoint', e);
-      return null;
-    }
-  }
-
-  void _logError(String operation, dynamic error) {
-    print("[ApiService] $operation ERROR: $error");
+  void _log(String message) {
+    print("[ApiService] $message");
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTH
   // ═══════════════════════════════════════════════════════════════════════════
 
+  /// Login — aniq natija qaytaradi
+  Future<LoginResult> loginUser(String email, String password) async {
+    final response = await _post('/login', body: {
+      "email": email,
+      "password": password,
+    });
+
+    if (!response.isSuccess) {
+      return LoginResult.failure(response.errorMessage ?? "Login xatosi");
+    }
+
+    try {
+      final data = response.data!;
+      if (data['token'] != null) {
+        await setToken(data['token']);
+      }
+      final user = data['user'];
+      if (user != null) {
+        await saveUserData(
+          userId: user['id'] ?? 0,
+          role: user['role'] ?? 'customer',
+          name: user['full_name'] ?? '',
+          barberId: user['barber_id'] != null ? int.tryParse(user['barber_id'].toString()) : null,
+        );
+      }
+      return LoginResult.success(data);
+    } catch (e) {
+      return LoginResult.failure("Javobni o'qishda xato");
+    }
+  }
+
+  /// Register
   Future<Map<String, dynamic>?> registerUser(
-      String name,
-      String email,
-      String password,
-      String role, {
-        String? experience,
-        String? phone,
-        String? specialization,
-        String? bio,
-        double? lat,
-        double? lng,
-      }) async {
+    String name,
+    String email,
+    String password,
+    String role, {
+    String? experience,
+    String? phone,
+    String? specialization,
+    String? bio,
+    double? lat,
+    double? lng,
+  }) async {
     final body = {
       "full_name": name,
       "email": email,
@@ -156,46 +323,20 @@ class ApiService {
     };
 
     final response = await _post('/register', body: body);
-    if (response == null) return null;
 
-    if (response.statusCode == 200 || response.statusCode == 201) {
-      final data = jsonDecode(response.body);
+    if (response.isSuccess) {
+      final data = response.data!;
       if (data['token'] != null) {
         await setToken(data['token']);
       }
       return data;
     }
 
-    if (response.statusCode == 409) {
+    if (response.errorType == ApiErrorType.conflict) {
       return {"error": "Bu email allaqachon ro'yxatdan o'tgan"};
     }
-    return {"error": "Ro'yxatdan o'tishda xatolik"};
-  }
 
-  Future<Map<String, dynamic>?> loginUser(String email, String password) async {
-    final response = await _post('/login', body: {
-      "email": email,
-      "password": password,
-    });
-
-    if (response == null) return null;
-
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      if (data['token'] != null) {
-        await setToken(data['token']);
-      }
-      final user = data['user'];
-      if (user != null) {
-        await saveUserData(
-          userId: user['id'] ?? 0,
-          role: user['role'] ?? 'customer',
-          name: user['full_name'] ?? '',
-        );
-      }
-      return data;
-    }
-    return null;
+    return {"error": response.errorMessage ?? "Ro'yxatdan o'tishda xatolik"};
   }
 
   Future<void> logout() async {
@@ -213,8 +354,8 @@ class ApiService {
 
   Future<List<Barber>> fetchBarbers(double lat, double lng, {double radiusKm = 2.0}) async {
     final response = await _get('/nearby_barbers?user_lat=$lat&user_lng=$lng&radius_km=$radiusKm');
-    if (response != null && response.statusCode == 200) {
-      final List<dynamic> data = jsonDecode(response.body);
+    if (response.isSuccess) {
+      final List<dynamic> data = response.data is List ? response.data : [];
       return data.map((j) => Barber.fromJson(j)).toList();
     }
     return await fetchAllBarbers(lat, lng);
@@ -222,8 +363,8 @@ class ApiService {
 
   Future<List<Barber>> fetchAllBarbers(double lat, double lng) async {
     final response = await _get('/all_barbers?user_lat=$lat&user_lng=$lng');
-    if (response != null && response.statusCode == 200) {
-      final List<dynamic> data = jsonDecode(response.body);
+    if (response.isSuccess) {
+      final List<dynamic> data = response.data is List ? response.data : [];
       return data.map((j) => Barber.fromJson(j)).toList();
     }
     return [];
@@ -231,8 +372,8 @@ class ApiService {
 
   Future<List<Barber>> searchBarbers(String query) async {
     final response = await _get('/search_barbers?query=${Uri.encodeComponent(query)}');
-    if (response != null && response.statusCode == 200) {
-      final List<dynamic> data = jsonDecode(response.body);
+    if (response.isSuccess) {
+      final List<dynamic> data = response.data is List ? response.data : [];
       return data.map((j) => Barber.fromJson(j)).toList();
     }
     return [];
@@ -240,20 +381,18 @@ class ApiService {
 
   Future<Map<String, dynamic>?> getBarberDetail(int barberId) async {
     final response = await _get('/barber/$barberId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess) return response.data as Map<String, dynamic>?;
     return null;
   }
 
   Future<bool> updateOnlineStatus(int barberId, bool isOnline) async {
     final response = await _put('/update_online_status/$barberId?is_online=$isOnline');
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
   }
 
   Future<bool> updateProfile(int barberId, Map<String, dynamic> data) async {
     final response = await _put('/update_profile/$barberId', body: data);
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
   }
 
   Future<bool> updateWorkingDays(int barberId, List<int> days) async {
@@ -266,7 +405,7 @@ class ApiService {
       ).timeout(_timeout);
       return response.statusCode == 200;
     } catch (e) {
-      _logError('updateWorkingDays', e);
+      _log('updateWorkingDays ERROR: $e');
       return false;
     }
   }
@@ -277,9 +416,7 @@ class ApiService {
 
   Future<Map<String, dynamic>?> getAvailableSlots(int barberId, String date) async {
     final response = await _get('/available_slots/$barberId?date=$date');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess) return response.data as Map<String, dynamic>?;
     return null;
   }
 
@@ -297,7 +434,7 @@ class ApiService {
       "end_time": endTime,
       "reason": reason ?? "",
     });
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -306,9 +443,7 @@ class ApiService {
 
   Future<List<dynamic>> getBarberServices(int barberId) async {
     final response = await _get('/get_services/$barberId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess && response.data is List) return response.data;
     return [];
   }
 
@@ -316,14 +451,14 @@ class ApiService {
       {int duration = 30, String description = ""}) async {
     final response = await _post(
       '/add_service?barber_id=$barberId&name=${Uri.encodeComponent(name)}'
-          '&price=$price&duration=$duration&description=${Uri.encodeComponent(description)}',
+      '&price=$price&duration=$duration&description=${Uri.encodeComponent(description)}',
     );
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
   }
 
   Future<bool> deleteService(int serviceId) async {
     final response = await _delete('/delete_service/$serviceId');
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -349,10 +484,8 @@ class ApiService {
       "notes": notes ?? "",
     });
 
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
-    if (response != null && response.statusCode == 409) {
+    if (response.isSuccess) return response.data as Map<String, dynamic>?;
+    if (response.errorType == ApiErrorType.conflict) {
       return {"error": "Bu vaqt band! Boshqa vaqt tanlang."};
     }
     return null;
@@ -360,28 +493,24 @@ class ApiService {
 
   Future<List<dynamic>> getCustomerAppointments(int customerId) async {
     final response = await _get('/customer_appointments/$customerId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess && response.data is List) return response.data;
     return [];
   }
 
   Future<List<dynamic>> getBarberAppointments(int barberId) async {
     final response = await _get('/barber_appointments/$barberId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess && response.data is List) return response.data;
     return [];
   }
 
   Future<bool> updateStatus(int appId, String status) async {
     final response = await _put('/update_appointment_status/$appId?status=$status');
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
   }
 
   Future<bool> cancelAppointment(int appId, int customerId) async {
     final response = await _put('/cancel_appointment/$appId?customer_id=$customerId');
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -402,14 +531,12 @@ class ApiService {
       "rating": rating,
       "comment": comment ?? "",
     });
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
   }
 
   Future<List<dynamic>> getBarberReviews(int barberId) async {
     final response = await _get('/barber_reviews/$barberId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess && response.data is List) return response.data;
     return [];
   }
 
@@ -427,17 +554,13 @@ class ApiService {
       "amount": amount,
       "method": method,
     });
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess) return response.data as Map<String, dynamic>?;
     return null;
   }
 
   Future<List<dynamic>> getPaymentHistory(int customerId) async {
     final response = await _get('/payment_history/$customerId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess && response.data is List) return response.data;
     return [];
   }
 
@@ -447,8 +570,8 @@ class ApiService {
 
   Future<Map<String, dynamic>> getBarberStats(int barberId) async {
     final response = await _get('/barber_stats/$barberId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
+    if (response.isSuccess && response.data is Map) {
+      return response.data as Map<String, dynamic>;
     }
     return _emptyStats;
   }
@@ -469,15 +592,15 @@ class ApiService {
 
   Future<Map<String, dynamic>> getNotifications(int userId) async {
     final response = await _get('/notifications/$userId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
+    if (response.isSuccess && response.data is Map) {
+      return response.data as Map<String, dynamic>;
     }
     return {"notifications": [], "unread_count": 0};
   }
 
   Future<bool> markNotificationsRead(int userId) async {
     final response = await _put('/mark_notifications_read/$userId');
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -486,17 +609,13 @@ class ApiService {
 
   Future<Map<String, dynamic>?> toggleFavorite(int customerId, int barberId) async {
     final response = await _post('/toggle_favorite?customer_id=$customerId&barber_id=$barberId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess) return response.data as Map<String, dynamic>?;
     return null;
   }
 
   Future<List<dynamic>> getFavorites(int customerId) async {
     final response = await _get('/favorites/$customerId');
-    if (response != null && response.statusCode == 200) {
-      return jsonDecode(response.body);
-    }
+    if (response.isSuccess && response.data is List) return response.data;
     return [];
   }
 
@@ -506,6 +625,79 @@ class ApiService {
 
   Future<bool> checkHealth() async {
     final response = await _get('/health');
-    return response != null && response.statusCode == 200;
+    return response.isSuccess;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RESPONSE MODELS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// API xato turlari
+enum ApiErrorType {
+  network,      // Internet yo'q, server topilmadi
+  timeout,      // Server javob bermayapti
+  unauthorized, // Token muddati tugagan (401)
+  forbidden,    // Ruxsat yo'q (403)
+  notFound,     // Topilmadi (404)
+  conflict,     // Duplicate (409)
+  validation,   // Ma'lumot noto'g'ri (422)
+  serverError,  // Server xatosi (500+)
+  unknown,      // Noma'lum
+}
+
+/// Umumiy API javob modeli
+class ApiResponse {
+  final bool isSuccess;
+  final dynamic data;
+  final String? errorMessage;
+  final ApiErrorType? errorType;
+  final int? statusCode;
+
+  ApiResponse._({
+    required this.isSuccess,
+    this.data,
+    this.errorMessage,
+    this.errorType,
+    this.statusCode,
+  });
+
+  factory ApiResponse.success(http.Response response) {
+    dynamic parsedData;
+    try {
+      parsedData = jsonDecode(response.body);
+    } catch (_) {
+      parsedData = response.body;
+    }
+    return ApiResponse._(
+      isSuccess: true,
+      data: parsedData,
+      statusCode: response.statusCode,
+    );
+  }
+
+  factory ApiResponse.error(String message, ApiErrorType type) {
+    return ApiResponse._(
+      isSuccess: false,
+      errorMessage: message,
+      errorType: type,
+    );
+  }
+}
+
+/// Login natijasi — aniq success yoki failure
+class LoginResult {
+  final bool isSuccess;
+  final Map<String, dynamic>? data;
+  final String? errorMessage;
+
+  LoginResult._({required this.isSuccess, this.data, this.errorMessage});
+
+  factory LoginResult.success(Map<String, dynamic> data) {
+    return LoginResult._(isSuccess: true, data: data);
+  }
+
+  factory LoginResult.failure(String message) {
+    return LoginResult._(isSuccess: false, errorMessage: message);
   }
 }
