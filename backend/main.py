@@ -77,13 +77,14 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 # ─── ROUTERS ─────────────────────────────────────────────────────────────────
 
 # Yangi API (versiyalangan, xavfsiz)
-from app.routers import auth, barbers, appointments, reviews, payments, notifications
+from app.routers import auth, barbers, appointments, reviews, payments, notifications, salons
 app.include_router(auth.router)
 app.include_router(barbers.router)
 app.include_router(appointments.router)
 app.include_router(reviews.router)
 app.include_router(payments.router)
 app.include_router(notifications.router)
+app.include_router(salons.router)
 
 # Legacy endpoints (eski Flutter frontend bilan moslik uchun)
 from app.routers import legacy

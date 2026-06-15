@@ -85,3 +85,13 @@ async def require_customer(current_user: dict = Depends(require_auth)) -> dict:
             detail="Bu amal faqat mijozlar uchun",
         )
     return current_user
+
+
+async def require_owner(current_user: dict = Depends(require_auth)) -> dict:
+    """Faqat owner (sartaroshxona egasi) role uchun"""
+    if current_user.get("role") != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Bu amal faqat sartaroshxona egalari uchun",
+        )
+    return current_user

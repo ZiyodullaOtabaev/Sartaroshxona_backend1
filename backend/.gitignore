@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# Uploads (foydalanuvchi yuklagan fayllar)
+uploads/
+
+# IDE
+.idea/
+.vscode/

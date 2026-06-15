@@ -43,6 +43,7 @@ async def register(user: UserRegister):
             user_id = cur.lastrowid
 
             barber_id = None
+            salon_id = None
 
             # Barber role uchun barbers jadvaliga yozish
             if user.role == "barber":
@@ -69,6 +70,43 @@ async def register(user: UserRegister):
                         (barber_id, day),
                     )
 
+            # Owner role uchun salon yaratish
+            elif user.role == "owner":
+                salon_name = user.salon_name or f"{user.full_name} sartaroshxonasi"
+                await cur.execute(
+                    "INSERT INTO salons (owner_id, name, address, phone, lat, lng, description) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        user_id,
+                        salon_name,
+                        user.salon_address or "",
+                        user.phone,
+                        user.lat,
+                        user.lng,
+                        user.bio or "",
+                    ),
+                )
+                salon_id = cur.lastrowid
+
+                # Owner o'zi ham sartarosh bo'lib ishlashni xohlasa
+                if user.also_barber:
+                    await cur.execute(
+                        "INSERT INTO barbers (user_id, salon_id, name, experience, phone, specialization, bio, lat, lng, rating, total_reviews, district) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 5.0, 0, 'Toshkent')",
+                        (
+                            user_id, salon_id, user.full_name,
+                            user.experience or "", user.phone,
+                            user.specialization or "", user.bio or "",
+                            user.lat, user.lng,
+                        ),
+                    )
+                    barber_id = cur.lastrowid
+                    for day in range(1, 7):
+                        await cur.execute(
+                            "INSERT INTO barber_working_days (barber_id, day_of_week, is_working) VALUES (%s, %s, 1)",
+                            (barber_id, day),
+                        )
+
             await conn.commit()
 
             # Token yaratish
@@ -84,6 +122,7 @@ async def register(user: UserRegister):
                 "status": "success",
                 "user_id": user_id,
                 "barber_id": barber_id,
+                "salon_id": salon_id,
                 "token": token,
             }
 
@@ -105,10 +144,13 @@ async def login(user: UserLogin):
         async with conn.cursor(aiomysql.DictCursor) as cur:
             await cur.execute(
                 "SELECT u.id, u.full_name, u.email, u.password_hash, u.role, u.phone, "
-                "u.loyalty_points, b.id as barber_id, b.is_online, b.rating, "
-                "b.specialization, b.bio, b.avatar_url, b.working_hours_start, "
-                "b.working_hours_end "
-                "FROM users u LEFT JOIN barbers b ON u.id = b.user_id "
+                "u.loyalty_points, b.id as barber_id, b.salon_id as barber_salon_id, "
+                "b.is_online, b.rating, b.specialization, b.bio, b.avatar_url, "
+                "b.working_hours_start, b.working_hours_end, "
+                "s.id as owned_salon_id, s.name as salon_name "
+                "FROM users u "
+                "LEFT JOIN barbers b ON u.id = b.user_id "
+                "LEFT JOIN salons s ON u.id = s.owner_id "
                 "WHERE u.email=%s",
                 (user.email,),
             )
