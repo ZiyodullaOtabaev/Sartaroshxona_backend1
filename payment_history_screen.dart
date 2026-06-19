@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:sartaroshxona/providers/theme_provider.dart';
 import 'package:sartaroshxona/services/api_service.dart';
+import 'package:sartaroshxona/widgets/glass_card.dart';
 
 class PaymentHistoryScreen extends StatefulWidget {
   final int userId;
@@ -175,14 +176,10 @@ class _PaymentHistoryScreenState extends State<PaymentHistoryScreen> {
     final method = payment['method']?.toString();
     final methodColor = _getMethodColor(method);
 
-    return Container(
+    return GlassContainer(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(14),
-      decoration: BoxDecoration(
-        color: colors.surface,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: colors.border),
-      ),
+      borderRadius: 14,
       child: Row(
         children: [
           Container(
