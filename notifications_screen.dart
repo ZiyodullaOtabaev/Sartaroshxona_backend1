@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:sartaroshxona/providers/theme_provider.dart';
 import 'package:sartaroshxona/services/api_service.dart';
 import 'package:sartaroshxona/widgets/shimmer_loading.dart';
+import 'package:sartaroshxona/widgets/glass_card.dart';
 
 
 class NotificationsScreen extends StatefulWidget {
@@ -162,16 +163,11 @@ class _NotificationsScreenState extends State<NotificationsScreen> {
     final type = notification['type']?.toString() ?? 'system';
     final isRead = notification['is_read'] == true || notification['is_read'] == 1;
 
-    return Container(
+    return GlassContainer(
       margin: const EdgeInsets.only(bottom: 10),
       padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: isRead ? colors.surface : colors.primary.withOpacity(0.05),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: isRead ? colors.border : colors.primary.withOpacity(0.2),
-        ),
-      ),
+      borderRadius: 14,
+      tintColor: isRead ? null : colors.primary,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [

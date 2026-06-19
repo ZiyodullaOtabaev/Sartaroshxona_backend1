@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:sartaroshxona/providers/theme_provider.dart';
 import 'package:sartaroshxona/services/api_service.dart';
 import 'package:sartaroshxona/screens/payment_screen.dart';
+import 'package:sartaroshxona/widgets/glass_card.dart';
 
 class CustomerAppointmentsScreen extends StatefulWidget {
   final int userId;
@@ -287,20 +288,9 @@ class _AppointmentCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    return GlassContainer(
       margin: const EdgeInsets.only(bottom: 14),
-      decoration: BoxDecoration(
-        color: colors.surface,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: colors.border),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
+      borderRadius: 18,
       child: Column(
         children: [
           Padding(

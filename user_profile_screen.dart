@@ -9,6 +9,7 @@ import 'package:sartaroshxona/screens/notifications_screen.dart';
 import 'package:sartaroshxona/screens/payment_history_screen.dart';
 import 'package:sartaroshxona/screens/change_password_screen.dart';
 import 'package:sartaroshxona/services/api_service.dart';
+import 'package:sartaroshxona/widgets/glass_card.dart';
 
 class UserProfileScreen extends StatefulWidget {
   final String userName;
@@ -278,8 +279,8 @@ class _UserProfileScreenState extends State<UserProfileScreen>
           padding: const EdgeInsets.fromLTRB(4, 4, 4, 8),
           child: Text(title, style: TextStyle(color: colors.textTertiary, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
         ),
-        Container(
-          decoration: BoxDecoration(color: colors.surface, borderRadius: BorderRadius.circular(16), border: Border.all(color: colors.border)),
+        GlassContainer(
+          borderRadius: 16,
           child: Column(
             children: List.generate(children.length, (i) {
               if (i < children.length - 1) {
